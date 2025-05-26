@@ -13,7 +13,7 @@ This project includes a Python script that interfaces with serial devices. It su
 ### Running the Script
 
 ```bash
-python main.py <serial_device> [options]
+python schiff.py <serial_device> [options]
 ```
 
 | Argument  | Description                                                              |
@@ -31,10 +31,10 @@ python main.py <serial_device> [options]
 
 ### Linux
 ```bash
-python main.py /dev/ttyUSB0 -v
+python schiff.py /dev/ttyUSB0 -v
 ```
 
 ### Windows
 ```bash
-python main.py COM23 --verbose
+python schiff.py COM23 --verbose
 ```
