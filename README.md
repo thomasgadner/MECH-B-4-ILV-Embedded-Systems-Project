@@ -1,16 +1,40 @@
 # C-BSc-Embedded-Systems Final Project
 
-Welcome to the official repository for the **C-BSc-Embedded-Systems course final project**. This project is the culmination of our coursework, showcasing the practical application of embedded systems concepts covered throughout the course.
 
-## 📁 Repository Contents
+## 🚀 Usage
 
-- Source code for the final project
+This project includes a Python script that interfaces with serial devices. It supports both Linux and Windows platforms.
 
-## 🐛 Bug Reports
+### Requirements
 
-If you encounter any bugs or issues, please feel free to report them using the [Issues](../../issues) section of this repository. Contributions and suggestions are always welcome!
+- Python 3.x
+- Access to a serial device (e.g., USB-to-serial adapter)
 
-## 📫 Contact
+### Running the Script
 
-For questions or feedback, please open an issue or submit a pull request. Thank you for checking out our project!
+```bash
+python main.py <serial_device> [options]
+```
 
+| Argument  | Description                                                              |
+| --------- | ------------------------------------------------------------------------ |
+| `ser_dev` | Serial device path: e.g. `/dev/ttyUSB0` on Linux, or `COM23` on Windows. |
+
+
+| Option               | Description                                         |
+| -------------------- | --------------------------------------------------- |
+| `-v`, `--verbose`    | Enable verbose logging (debug mode).                |
+| `-s`, `--single`     | Run in single operation mode.                       |
+| `-n`, `--notimeout`  | Disable timeout handling.                           |
+| `-t`, `--tournament` | Enable tournament mode (specific project behavior). |
+
+
+### Linux
+```bash
+python main.py /dev/ttyUSB0 -v
+```
+
+### Windows
+```bash
+python main.py COM23 --verbose
+```
