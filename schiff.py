@@ -422,7 +422,7 @@ class StateMachine:
         # we check win/loss condition
         we_lost = False
         if self.f.ships_left() == 0:
-            logging.warning("we have no ships left, we just lost the game")
+            logging.info("we have no ships left, we just lost the game")
             send_sf_records = True
             we_lost = True
 
@@ -464,6 +464,7 @@ def main(state_machine, args):
         print("0--------1---------2---------3---------4---------5---------6---------7---------8---------9---------|")
 
     while True:
+        tournament_result_char = 'a'
         try:
             state_machine.reset()
             our_field = Field()
@@ -479,8 +480,10 @@ def main(state_machine, args):
 
             if state_machine.we_won:
                 won += 1
+                tournament_result_char = 'w'
             else:
                 lost += 1
+                tournament_result_char = 'l'
 
         except RuntimeError as e:
             logging.error("Exception in game-loop, will reset the game state")
@@ -501,7 +504,7 @@ def main(state_machine, args):
             logging.debug("waiting 1 second")
             time.sleep(1)
         else:
-            print("w" if won else "l" if lost else "a", end="", flush=True)
+            print(tournament_result_char, end="", flush=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(epilog="Ein Schiff im Hafen ist sicher, doch dafür werden Schiffe nicht gebaut")
