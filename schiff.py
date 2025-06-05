@@ -422,7 +422,7 @@ class StateMachine:
         # we check win/loss condition
         we_lost = False
         if self.f.ships_left() == 0:
-            logging.warning("we have no ships left, we just lost the game")
+            logging.info("we have no ships left, we just lost the game")
             send_sf_records = True
             we_lost = True
 
