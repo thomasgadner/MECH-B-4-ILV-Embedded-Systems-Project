@@ -439,6 +439,7 @@ class StateMachine:
 
         if we_lost:
             # i case we just lost the round we can now receive their SF records
+            self.their_r = {}
             for _ in range(0, self.f.sz):
                 # read more of those messaged, one has already been received
                 self.ser_io.receive(self.sf_handler)
