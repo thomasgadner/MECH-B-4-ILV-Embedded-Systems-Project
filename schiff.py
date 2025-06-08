@@ -337,6 +337,72 @@ class StateMachine:
         for i in range(0, len(self.their_r)):
             logging.info("{}".format(self.their_r[i]))
 
+        # now validate their SF, i.e. correct number of ships, correct placement and the like
+        # we scan the field top-down, left-right and find the orientation of each one
+        vv = dict()
+
+        for i in range(0, len(self.their_r)):
+            for j in range(0, len(self.their_r[i])):
+                vv[self.f.xy_to_idx(i, j)] = self.their_r[i][j]
+
+        detected_ships = {}
+        for i in range(0, len(self.their_r)):
+            for j in range(0, len(self.their_r[i])):
+                if vv[self.f.xy_to_idx(i, j)] != '0':
+                    # we found something, count it
+                    ship_len = vv[self.f.xy_to_idx(i, j)]
+                    assert(ship_len in ['2', '3', '4', '5'])
+                    ship_len = int(ship_len)
+                    if not ship_len in detected_ships:
+                        detected_ships[ship_len] = 1
+                    else:
+                        detected_ships[ship_len] += 1
+
+                    ship_h = False
+                    ship_v = False
+                    if j+ship_len-1 < self.f.sz and vv[self.f.xy_to_idx(i, j+1)] == str(ship_len):
+                        # we may look to the right, we may have a horizontal ship after all
+                        ship_h = all(map(lambda x: vv[self.f.xy_to_idx(i, j+x)] == vv[self.f.xy_to_idx(i, j)], range(0, ship_len)))
+                    elif i+ship_len-1 < self.f.sz and self.their_r[i+1][j] == str(ship_len):
+                        # we may look downwards, we may have a vertical ship after all
+                        ship_v = all(map(lambda x: vv[self.f.xy_to_idx(i+x,j)] == vv[self.f.xy_to_idx(i, j)], range(0, ship_len)))
+                    else:
+                        logging.error("your ship of len={}, starting at row {} col {} overlaps the gamefield".format(ship_len, i, j))
+
+                    
+                    # is the ship staight?
+                    if not ship_h and not ship_v:
+                        logging.error("your ship of len={}, starting at row {} col {} is neither horizontally nor vertically straight".format(ship_len, i, j))
+
+
+                    # ship seems to be fine, now delete it otherwise we will later find a middle part and fail miserably
+                    if ship_h:
+                        for x in range(0, ship_len): 
+                            vv[self.f.xy_to_idx(i, j+x)] = '0'
+                    else:
+                        for x in range(0, ship_len): 
+                            vv[self.f.xy_to_idx(i+x, j)] = '0'
+
+                    if False:
+                        for x in range(0, 10):
+                            l = ""
+                            for y in range(0, 10):
+                               l += vv[self.f.xy_to_idx(x,y)] 
+                            logging.info("{}".format(l))
+
+                    # are the surround fields empty, need to do that AFTER we cleared the ship: the field occupied by the ship are part of surr_fields as well
+                    if any(map(lambda xy: vv[self.f.xy_to_idx(xy[0],xy[1])] != '0', self.f.surr_fields(i, j, 'vert' if ship_v else 'horiz', ship_len))):
+                        logging.error("your ship of len={}, starting at row {} col {} is not only surrounded by water".format(ship_len, i, j))
+
+                    logging.info("I've just check your ship of len={} starting at row {} col {} ({} placement), if no errors are shown it was good".format(ship_len, i, j, 'vert ' if ship_v else 'horiz'))
+
+        # now check if all ship have been found
+        for k in nr_ships.keys():
+            try:
+                if detected_ships[k] != nr_ships[k]:
+                    logging.error("number of ships with len={} not correct!".format(k))
+            except:
+                logging.error("do you miss ships of certain length at all?")
        
     def boom_handler(self, text, was_timeout) -> tuple[bool, bool, bool]:
         if was_timeout:
@@ -486,9 +552,10 @@ def main(state_machine, args):
                 tournament_result_char = 'l'
 
         except (TimeoutError, RuntimeError) as e:
-            logging.error("Exception in game-loop, will reset the game state")
-            logging.error(e)
-            traceback.print_exc()
+            if not args.tournament:
+                logging.error("Exception in game-loop, will reset the game state")
+                logging.error(e)
+                traceback.print_exc()
             aborted += 1
 
         if args.single:
