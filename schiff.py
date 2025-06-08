@@ -485,7 +485,7 @@ def main(state_machine, args):
                 lost += 1
                 tournament_result_char = 'l'
 
-        except RuntimeError as e:
+        except (TimeoutError, RuntimeError) as e:
             logging.error("Exception in game-loop, will reset the game state")
             logging.error(e)
             traceback.print_exc()
