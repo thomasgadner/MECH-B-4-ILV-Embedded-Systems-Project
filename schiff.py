@@ -195,6 +195,8 @@ class FireSolution:
         self.sz = sz
         # all candiate coordiantes to shoot at
         self.cand = [(x,y) for x in range(0, sz) for y in range(0, sz)]
+        self.hit_list = []
+        self.miss_list = []
 
     def get_coord(self) -> tuple[int, int]:
         """get next coordinates to fire at
@@ -205,15 +207,38 @@ class FireSolution:
         assert(False)
 
     def update(self, coord, was_a_hit):
-        """get next coordinates to fire at
+        """keep record for later ;)
         Args:
             coord ((int,int)): tuple of row column where we fired
-            was_a_hit (bool): whether we hit there of not
+            was_a_hit (bool): whether we hit there or not
         Returns:
             None
         """
-        # we ignore this information in the base class
-        pass
+        if was_a_hit:
+            self.hit_list.append(coord)
+        else:
+            self.miss_list.append(coord)
+
+    def validate(self, their_r):
+        """later is now, test our hit/miss lists against the actual gamefield
+        Args:
+            their_r, SF record (data onyl) as string
+        Returns:
+            None
+        """
+        no_error = True
+        for r,c in self.hit_list:
+            if their_r[r][c] == '0':
+                logging.error("we shot at row={} col={} and hit, but according to your SF records there is water".format(r, c))
+                no_error = False
+        logging.info("I've checked all your {} number of hits reported, they all are correct according to your SF record".format(len(self.hit_list)))
+        for r,c in self.miss_list:
+            if their_r[r][c] != '0':
+                logging.error("we shit at row={} col={} and missed, but accordingly to your SF records there is a ship".format(r, c))
+                no_error = False
+        logging.info("I've checked all your {} number of misses reported, they all are correct according to your SF record".format(len(self.miss_list)))
+        
+        return no_error
     
 
 class StupidFireSolution(FireSolution):
@@ -239,6 +264,7 @@ class StateMachine:
         self.state = self.State.INIT
         self.ser_io = ser_io
         self.we_won = False
+        self.hit_counter = 0
 
     def set_fire_solution(self, fs):
         self.fs = fs
@@ -261,6 +287,7 @@ class StateMachine:
         if self.state != self.State.INIT:
             raise RuntimeError("StateMachine start() when not in INIT")
         self.f = our_field
+        self.hit_counter = 0
         while True: 
             self.ser_io.send_line("HD_START")
             try:
@@ -346,6 +373,7 @@ class StateMachine:
                 vv[self.f.xy_to_idx(i, j)] = self.their_r[i][j]
 
         detected_ships = {}
+        has_error = False
         for i in range(0, len(self.their_r)):
             for j in range(0, len(self.their_r[i])):
                 if vv[self.f.xy_to_idx(i, j)] != '0':
@@ -368,11 +396,13 @@ class StateMachine:
                         ship_v = all(map(lambda x: vv[self.f.xy_to_idx(i+x,j)] == vv[self.f.xy_to_idx(i, j)], range(0, ship_len)))
                     else:
                         logging.error("your ship of len={}, starting at row {} col {} overlaps the gamefield".format(ship_len, i, j))
+                        has_error = True
 
                     
                     # is the ship staight?
                     if not ship_h and not ship_v:
                         logging.error("your ship of len={}, starting at row {} col {} is neither horizontally nor vertically straight".format(ship_len, i, j))
+                        has_error = True
 
 
                     # ship seems to be fine, now delete it otherwise we will later find a middle part and fail miserably
@@ -393,6 +423,7 @@ class StateMachine:
                     # are the surround fields empty, need to do that AFTER we cleared the ship: the field occupied by the ship are part of surr_fields as well
                     if any(map(lambda xy: vv[self.f.xy_to_idx(xy[0],xy[1])] != '0', self.f.surr_fields(i, j, 'vert' if ship_v else 'horiz', ship_len))):
                         logging.error("your ship of len={}, starting at row {} col {} is not only surrounded by water".format(ship_len, i, j))
+                        has_error = True
 
                     logging.info("I've just check your ship of len={} starting at row {} col {} ({} placement), if no errors are shown it was good".format(ship_len, i, j, 'vert ' if ship_v else 'horiz'))
 
@@ -401,8 +432,17 @@ class StateMachine:
             try:
                 if detected_ships[k] != nr_ships[k]:
                     logging.error("number of ships with len={} not correct!".format(k))
+                    has_error = True
             except:
                 logging.error("do you miss ships of certain length at all?")
+                has_error = True
+
+        # now check if they ever lied to us during the game
+        if not self.fs.validate(self.their_r):
+            has_error = True
+
+        if has_error: 
+            raise RuntimeError("did you try to cheat?")
        
     def boom_handler(self, text, was_timeout) -> tuple[bool, bool, bool]:
         if was_timeout:
@@ -463,6 +503,10 @@ class StateMachine:
             self.fs.update(xy, we_hit)
             if we_hit:
                 logging.info("we HIT  @{}".format(xy))
+                self.hit_counter += 1
+                max_hits = sum(map(lambda x: x[0]*x[1], nr_ships.items()))
+                if self.hit_counter >= max_hits:
+                    raise RuntimeError("According to you we've hit more than {} times, but you never sent the SF records".format(max_hits))
             else:
                 logging.info("we MISS @{}".format(xy))
                 
