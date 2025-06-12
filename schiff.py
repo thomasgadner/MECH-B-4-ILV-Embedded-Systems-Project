@@ -53,7 +53,13 @@ class SerialIO:
             if c == b"\r":
                 continue
             if c == b"\n":
-                break
+                if l.startswith("DH_#"):
+                    # this is a comment line, just print it
+                    print("COMMENT: {}".format(l))
+                    l = ""
+                    continue
+                else:
+                    break
             l += c.decode('ascii')
         logging.debug("<--{}".format(l))
         return callback(l, False)
