@@ -27,42 +27,92 @@ nr_ships = {
 # some constatns
 FIELD_SZ = 10
 
-class SerialIO:
-    """ handling communication over the serial port
+# protocol message IDs (3-byte ASCII identifiers)
+MSG_START = b'STR' # STR ... start, payload is opponent name as ASCII string, e.g. "RL" for Roland Lezuo
+MSG_CS = b'CSH' # CS ... checksum, a string of 10 digits, each digit is the number of ship parts in the corresponding row
+MSG_SF = b'SFR' # SF ... ship field, payload is 11 bytes, first byte is row index, followed by 10 ASCII digits representing the row data, e.g. "0000200000" for a row with a single ship part in column 4
+MSG_BOOM = b'BOO' # BOO ... boom, payload is 2 bytes, row and column to fire at, e.g. b'\x03\x04' for firing at row 3 column 4
+MSG_BOOM_RESULT = b'BMR' # BMR ... boom result, payload is 1 byte, b'H' for hit, b'M' for miss, e.g. b'H' for a hit at the coordinates we fired at with BOO
 
-    provides convenience function like receiving and sending lines and implements timeout
+class SerialIO:
+    """handling communication over the serial port using framed messages.
+
+    Message frame: [Header][Message-ID][Länge][Payload][CRC][EOF]
+    Header: `#`
+    Message-ID: 3 bytes
+    Länge: 1 byte
+    Payload: `Länge` bytes
+    CRC: checksum over Message-ID, Länge and Payload
+    EOF: `$`
     """
+    HEADER_BYTE = b'#'
+    EOF_BYTE = b'$'
+
     def __init__(self, args):
         self.ser_dev = args.ser_dev
         self.notimeout = args.notimeout
-        self.dev = serial.serial_for_url(self.ser_dev, 115200, timeout=2)
+        self.raw_debug = getattr(args, 'raw_debug', False)
+        self.dev = serial.serial_for_url(self.ser_dev, 9600, timeout=2)
 
-    def send_line(self, text):
-        logging.debug("-->{}".format(text))
-        self.dev.write("{}\r\n".format(text).encode('ascii'))
+    def _calc_crc(self, msg_id: bytes, length: int, payload: bytes) -> int:
+        # Simple 8-bit additive checksum compatible with the repository test helper.
+        data = msg_id + bytes([length]) + payload
+        return sum(data) & 0xFF
 
-    def receive(self, callback):
-        l = ""
-        while True:
-            c = self.dev.read(1)
-            if c == b"":
+    def _read_exact(self, count: int) -> bytes:
+        data = b''
+        while len(data) < count:
+            if self.raw_debug:
+                logging.debug("SERIAL RX waiting for %d bytes", count - len(data))
+            chunk = self.dev.read(count - len(data))
+            if chunk == b'':
                 if self.notimeout:
                     continue
-                else:
-                    raise TimeoutError('timeout while waiting for data from device')
-            if c == b"\r":
-                continue
-            if c == b"\n":
-                if l.startswith("DH_#"):
-                    # this is a comment line, just print it
-                    print("COMMENT: {}".format(l))
-                    l = ""
+                raise TimeoutError('timeout while waiting for data from device')
+            if self.raw_debug:
+                logging.debug("SERIAL RX %s", chunk.hex())
+            data += chunk
+        return data
+
+    def send_message(self, msg_id: bytes, payload: bytes):
+        if payload is None:
+            payload = b''
+        if not isinstance(msg_id, (bytes, bytearray)) or len(msg_id) != 3:
+            raise ValueError('message ID must be 3 ASCII bytes')
+        if len(payload) > 255:
+            raise ValueError('payload too long for protocol frame')
+        frame = self.HEADER_BYTE + msg_id + bytes([len(payload)]) + payload
+        crc = self._calc_crc(msg_id, len(payload), payload)
+        frame += bytes([crc]) + self.EOF_BYTE
+        logging.debug("--> %s", frame.hex())
+        if self.raw_debug:
+            logging.debug("SERIAL TX %s", frame.hex())
+        self.dev.write(frame)
+
+    def receive_message(self) -> tuple[bytes, bytes]:
+        while True:
+            c = self.dev.read(1)
+            if c == b'':
+                if self.notimeout:
                     continue
-                else:
-                    break
-            l += c.decode('ascii')
-        logging.debug("<--{}".format(l))
-        return callback(l, False)
+                raise TimeoutError('timeout while waiting for data from device')
+            if c != self.HEADER_BYTE:
+                continue
+            break
+
+        header = self._read_exact(4)
+        msg_id, length = header[:3], header[3]
+        payload = self._read_exact(length)
+        crc_byte = self._read_exact(1)[0]
+        eof = self._read_exact(1)
+        if eof != self.EOF_BYTE:
+            raise RuntimeError('protocol error: missing EOF')
+        expected_crc = self._calc_crc(msg_id, length, payload)
+        if crc_byte != expected_crc:
+            raise RuntimeError('protocol error: CRC mismatch')
+
+        logging.debug("<-- id=%s len=%d payload=%s crc=%02x", msg_id.decode('ascii', errors='ignore'), length, payload, crc_byte)
+        return msg_id, payload
 
 class Field:
     """our game field
@@ -192,7 +242,6 @@ class Field:
 
 class FireSolution:
     """a base class for all Fire Solutions, this calculates where we shoot next
-
     defines get_coord / upate interface and generates a list of all candidates
     must be overloaded as get_coord asserts
     """
@@ -240,7 +289,8 @@ class FireSolution:
         logging.info("I've checked all your {} number of hits reported, they all are correct according to your SF record".format(len(self.hit_list)))
         for r,c in self.miss_list:
             if their_r[r][c] != '0':
-                logging.error("we shit at row={} col={} and missed, but accordingly to your SF records there is a ship".format(r, c))
+                logging.error(f"Checking cell: their_r[{r}][{c}] = {their_r[r][c]}")
+                logging.error("we shot at row={} col={} and missed, but accordingly to your SF records there is a ship".format(r, c))
                 no_error = False
         logging.info("I've checked all your {} number of misses reported, they all are correct according to your SF record".format(len(self.miss_list)))
         
@@ -294,62 +344,50 @@ class StateMachine:
             raise RuntimeError("StateMachine start() when not in INIT")
         self.f = our_field
         self.hit_counter = 0
-        while True: 
-            self.ser_io.send_line("HD_START")
+        while True:
+            self.ser_io.send_message(MSG_START, b'')
             try:
-                ok = self.ser_io.receive(self.start_handler)
-                if ok: break 
-            except TimeoutError as _:
+                msg_id, payload = self.ser_io.receive_message()
+                if self.start_handler(msg_id, payload):
+                    break
+            except TimeoutError:
                 # when we send out starts and wait for a device timeouts are not fatal, just continue
+                logging.debug("no reply to START frame, retrying...")
                 pass
 
-    def start_handler(self, text, was_timeout):
-        if was_timeout:
-            self.timeout()
-            return False
-        else:
-            m = re.match(r"^DH_START_(.+)$", text)
-            if m is None:
-                raise RuntimeError("expected DH_START_ message, got something else")
-            self.opponent = m[1]
-            logging.info("Opponent name {}".format(self.opponent))
+    def start_handler(self, msg_id: bytes, payload: bytes) -> bool:
+        if msg_id != MSG_START:
+            raise RuntimeError("expected START message, got something else")
 
-            # send our checksum
-            self.ser_io.send_line("HD_CS_{}".format(self.f.get_cs_record()))
-            # receive opponent's checksum
-            if not self.ser_io.receive(self.cs_handler):
-                raise RuntimeError("error while processing opponent's CS message")
+        self.opponent = payload.decode('ascii', errors='ignore')
+        logging.info("Opponent name {}".format(self.opponent))
 
-            self.state = self.State.PLAY
-            return True
+        self.ser_io.send_message(MSG_CS, self.f.get_cs_record().encode('ascii'))
+        msg_id, payload = self.ser_io.receive_message()
+        return self.cs_handler(msg_id, payload)
 
-    def cs_handler(self, text, was_timeout):
-        if was_timeout:
-            self.timeout()
-            return False
+    def cs_handler(self, msg_id: bytes, payload: bytes) -> bool:
+        if msg_id != MSG_CS:
+            raise RuntimeError("expected CS message, got something else")
 
-        m = re.match(r"^DH_CS_(\d{10})$", text)
-        if m is None:
-                raise RuntimeError("expected DH_CS_ message, got something else")
-        self.their_cs = m[1]
+        self.their_cs = payload.decode('ascii')
         logging.debug("Received opponent CS: {}".format(self.their_cs))
         their_ships_total = sum(map(lambda x: int(x), self.their_cs))
         our_ships_total = sum(map(lambda x: x*nr_ships[x], nr_ships.keys()))
 
         if our_ships_total != their_ships_total:
             raise RuntimeError("total number of reported ship parts {}, but it should be {}".format(their_ships_total, our_ships_total))
+        self.state = self.State.PLAY
         return True
 
-    def sf_handler(self, text, was_timeout) -> bool:
-        if was_timeout:
-            self.timeout()
+    def sf_handler(self, msg_id: bytes, payload: bytes) -> bool:
+        if msg_id != MSG_SF:
             return False
-
-        m = re.match(r"^DH_SF(\d)D(\d{10})$", text)
-        if m is None:
-             return False
-
-        self.their_r[int(m[1])] = m[2]
+        if len(payload) != 11:
+            raise RuntimeError('SF message payload must be 11 bytes')
+        row = payload[0]
+        row_data = payload[1:].decode('ascii')
+        self.their_r[row] = row_data
         return True
 
     def validate_their_r(self):
@@ -370,23 +408,42 @@ class StateMachine:
         for i in range(0, len(self.their_r)):
             logging.info("{}".format(self.their_r[i]))
 
-        # now validate their SF, i.e. correct number of ships, correct placement and the like
+        # now validate their SF, i.e. correct number of ships, correct placement
         # we scan the field top-down, left-right and find the orientation of each one
         vv = dict()
 
         for i in range(0, len(self.their_r)):
             for j in range(0, len(self.their_r[i])):
-                vv[self.f.xy_to_idx(i, j)] = self.their_r[i][j]
+                val = self.their_r[i][j]
+                if isinstance(val, int):
+                    val = chr(val)
+                vv[self.f.xy_to_idx(i, j)] = val
 
         detected_ships = {}
         has_error = False
         for i in range(0, len(self.their_r)):
             for j in range(0, len(self.their_r[i])):
-                if vv[self.f.xy_to_idx(i, j)] != '0':
+                
+                    cell = vv[self.f.xy_to_idx(i, j)]
+                    if cell == '0':
+                        continue
+                    
+                    # skip if NOT a start cell
+                    if (i > 0 and vv[self.f.xy_to_idx(i-1, j)] == cell) or \
+                       (j > 0 and vv[self.f.xy_to_idx(i, j-1)] == cell):
+                        continue
+
                     # we found something, count it
-                    ship_len = vv[self.f.xy_to_idx(i, j)]
-                    assert(ship_len in ['2', '3', '4', '5'])
-                    ship_len = int(ship_len)
+                    ship_len = cell
+                    valid_sizes = [2, 3, 4, 5]                    
+                    
+                    if cell not in ['2', '3', '4', '5']:
+                        logging.error(f"invalid ship value '{ship_len}' at ({i},{j})")
+                        has_error = True
+                        continue
+
+
+                    ship_len = int(cell)
                     if not ship_len in detected_ships:
                         detected_ships[ship_len] = 1
                     else:
@@ -397,33 +454,33 @@ class StateMachine:
                     if j+ship_len-1 < self.f.sz and vv[self.f.xy_to_idx(i, j+1)] == str(ship_len):
                         # we may look to the right, we may have a horizontal ship after all
                         ship_h = all(map(lambda x: vv[self.f.xy_to_idx(i, j+x)] == vv[self.f.xy_to_idx(i, j)], range(0, ship_len)))
-                    elif i+ship_len-1 < self.f.sz and self.their_r[i+1][j] == str(ship_len):
+                    
+                    elif (i + ship_len - 1 < self.f.sz and vv[self.f.xy_to_idx(i+1, j)] == str(ship_len)):
+
                         # we may look downwards, we may have a vertical ship after all
                         ship_v = all(map(lambda x: vv[self.f.xy_to_idx(i+x,j)] == vv[self.f.xy_to_idx(i, j)], range(0, ship_len)))
                     else:
                         logging.error("your ship of len={}, starting at row {} col {} overlaps the gamefield".format(ship_len, i, j))
                         has_error = True
 
-                    
                     # is the ship staight?
                     if not ship_h and not ship_v:
                         logging.error("your ship of len={}, starting at row {} col {} is neither horizontally nor vertically straight".format(ship_len, i, j))
                         has_error = True
 
-
                     # ship seems to be fine, now delete it otherwise we will later find a middle part and fail miserably
                     if ship_h:
-                        for x in range(0, ship_len): 
+                        for x in range(0, ship_len):
                             vv[self.f.xy_to_idx(i, j+x)] = '0'
                     else:
-                        for x in range(0, ship_len): 
+                        for x in range(0, ship_len):
                             vv[self.f.xy_to_idx(i+x, j)] = '0'
 
                     if False:
                         for x in range(0, 10):
                             l = ""
                             for y in range(0, 10):
-                               l += vv[self.f.xy_to_idx(x,y)] 
+                               l += vv[self.f.xy_to_idx(x,y)]
                             logging.info("{}".format(l))
 
                     # are the surround fields empty, need to do that AFTER we cleared the ship: the field occupied by the ship are part of surr_fields as well
@@ -447,56 +504,63 @@ class StateMachine:
         if not self.fs.validate(self.their_r):
             has_error = True
 
-        if has_error: 
+        if has_error:
             raise RuntimeError("did you try to cheat?")
-       
-    def boom_handler(self, text, was_timeout) -> tuple[bool, bool, bool]:
-        if was_timeout:
-            self.timeout()
-            return False, False, False
 
-        m = re.match(r"^DH_BOOM_([HM])$", text)
-        if m is None:
-            # maybe we won, try to parse text as sf record
-            self.their_r = {}
-            ok = self.sf_handler(text, False)
-            if not ok:
-                raise RuntimeError("expected DH_BOOM_H or DH_BOOM_M or DH_SF message(s), got something else")
-            else:
-                for _ in range(1, self.f.sz):
-                    # read more of those messaged, one has already been received
-                    self.ser_io.receive(self.sf_handler)
-
-                # raises if data is not correct
-                self.validate_their_r()
-
-
-            # sucess, we won and we hit ;)
-            return True, True, True
-        else:
-            if m[1] == 'H':
-                we_hit = True
-            else:
-                we_hit = False
+    def boom_handler(self, msg_id: bytes, payload: bytes) -> tuple[bool, bool, bool]:
+        if msg_id == MSG_BOOM_RESULT:
+            if len(payload) != 1:
+                raise RuntimeError('BOOM result payload wrong size')
+            we_hit = payload == b'H'
             return True, False, we_hit
 
-    def hitmiss_handler(self, text, was_timeout) -> tuple[bool, tuple[int, int] | None]:
-        if was_timeout:
-            self.timeout()
-            return False, None 
+        if msg_id == MSG_SF:
+            self.their_r = {}
 
-        m = re.match(r"^DH_BOOM_(\d)_(\d)$", text)
-        if m is None:
-                raise RuntimeError("expected DH_BOOM_x_y message, got something else")
-        coords = int(m[1]),int(m[2])
+            # first row
+            row = payload[0]
+            cols = payload[1:]
+
+            if len(cols) != 10:
+                raise RuntimeError('invalid SF row length')
+
+            self.their_r[row] = cols.decode('ascii')
+
+            # remaining 9 rows
+            for _ in range(9):
+                msg_id, payload = self.ser_io.receive_message()
+
+                if msg_id != MSG_SF:
+                    raise RuntimeError('expected SF message after win')
+
+                row = payload[0]
+                cols = payload[1:]
+
+                if len(cols) != 10:
+                    raise RuntimeError('invalid SF row length')
+
+                self.their_r[row] = cols.decode('ascii')
+
+            # validate complete field
+            self.validate_their_r()
+
+            # ✅ THIS is the important line
+            return True, True, False
+        
+        raise RuntimeError('expected BOOM result or SF message, got something else')
+
+    def hitmiss_handler(self, msg_id: bytes, payload: bytes) -> tuple[bool, tuple[int, int]]:
+        if msg_id != MSG_BOOM or len(payload) != 2:
+            raise RuntimeError('expected BOOM coordinate message, got something else')
+        coords = int(payload[0]), int(payload[1])
         return True, coords
 
     def play(self):
-        # we shoot, first get some coordinates tuple[int,int], may raise exception
         xy = self.fs.get_coord()
 
-        self.ser_io.send_line("HD_BOOM_{}_{}".format(*xy))
-        ok,we_won,we_hit = self.ser_io.receive(self.boom_handler)
+        self.ser_io.send_message(MSG_BOOM, bytes([xy[0], xy[1]]))
+        msg_id, payload = self.ser_io.receive_message()
+        ok, we_won, we_hit = self.boom_handler(msg_id, payload)
 
         if not ok:
             self.err_out()
@@ -505,7 +569,6 @@ class StateMachine:
         send_sf_records = False
         they_hit = False
         if not we_won:
-            # update fire-solution
             self.fs.update(xy, we_hit)
             if we_hit:
                 logging.info("we HIT  @{}".format(xy))
@@ -515,14 +578,13 @@ class StateMachine:
                     raise RuntimeError("According to you we've hit more than {} times, but you never sent the SF records".format(max_hits))
             else:
                 logging.info("we MISS @{}".format(xy))
-                
-            # now pray as they shoot at us
-            ok,xy = self.ser_io.receive(self.hitmiss_handler)
+
+            msg_id, payload = self.ser_io.receive_message()
+            ok, xy = self.hitmiss_handler(msg_id, payload)
             if not ok:
                 self.err_out()
                 return
 
-            # update our field accordingly, send messages later, when we know whether we lost or not
             they_hit = self.f.shot_at(*xy)
             if they_hit:
                 logging.info("they HIT  @{}".format(xy))
@@ -531,36 +593,28 @@ class StateMachine:
 
             logging.info("Our Gamefield\n: {}".format(self.f))
         else:
-            # now that we've won alredy we send our SF records to the opponent
             send_sf_records = True
 
-
-        # we check win/loss condition
         we_lost = False
         if self.f.ships_left() == 0:
             logging.info("we have no ships left, we just lost the game")
             send_sf_records = True
             we_lost = True
 
-
         if send_sf_records:
-            # when we've lost or when we've won we need to send our SF records, do it
-            for sfl in self.f.get_sf_records():
-                self.ser_io.send_line("HD_{}".format(sfl))
+            for row_idx, row in enumerate(self.f.get_sf_records()):
+                payload = bytes([row_idx]) + row.encode('ascii')
+                self.ser_io.send_message(MSG_SF, payload)
         else:
-            if they_hit:
-                self.ser_io.send_line("HD_BOOM_H")
-            else:
-                self.ser_io.send_line("HD_BOOM_M")
+            result_payload = b'H' if they_hit else b'M'
+            self.ser_io.send_message(MSG_BOOM_RESULT, result_payload)
 
         if we_lost:
-            # i case we just lost the round we can now receive their SF records
             self.their_r = {}
             for _ in range(0, self.f.sz):
-                # read more of those messaged, one has already been received
-                self.ser_io.receive(self.sf_handler)
-
-            # raises if data is not correct
+                msg_id, payload = self.ser_io.receive_message()
+                if not self.sf_handler(msg_id, payload):
+                    raise RuntimeError('expected SF message after loss')
             self.validate_their_r()
 
         if we_lost or we_won:
@@ -630,6 +684,7 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--single', action='store_true')
     parser.add_argument('-n', '--notimeout', action='store_true')
     parser.add_argument('-t', '--tournament', action='store_true')
+    parser.add_argument('--raw-debug', action='store_true', help='log raw serial bytes sent and received')
     args = parser.parse_args()
 
 
@@ -640,6 +695,8 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.INFO)
 
+    if args.raw_debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     # try to open the serial port
     ser_io = SerialIO(args)
