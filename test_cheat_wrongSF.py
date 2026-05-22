@@ -119,10 +119,18 @@ def all_ships_destroyed():
 
 # ---------------- SFR HELPERS ----------------
 
-def send_sfr():
+def send_sfr_honest():
+    """Send our real field."""
     for row in range(10):
         row_str = "".join(str(original_field[row][col]) for col in range(10))
         send_frame("SFR", bytes([row]) + row_str.encode('ascii'))
+
+
+def send_sfr_forged():
+    """Send an all-water field — everything looks like a miss."""
+    print("CHEATING: sending forged all-zero SFR")
+    for row in range(10):
+        send_frame("SFR", bytes([row]) + b'0' * 10)
 
 
 def recv_and_validate_sfr(we_hit_coords, we_miss_coords):
@@ -164,7 +172,6 @@ def validate_their_shots_on_our_field(hit_coords, miss_coords):
 
 # ---------------- WINNING FIRE SOLUTION ----------------
 
-their_cs = None
 fire_queue = []
 fire_index = 0
 
@@ -197,7 +204,7 @@ host_hit_coords = []
 host_miss_coords = []
 we_hit_coords = []
 we_miss_coords = []
-pending_shots = deque()  # FIFO: coords we fired, waiting for BMR
+pending_shots = deque()
 
 
 # ---------------- HANDSHAKE ----------------
@@ -206,7 +213,6 @@ time.sleep(1)
 
 send_frame("STR", b"RL")
 _, csh_payload = recv_frame()  # CSH from host
-
 their_cs = csh_payload.decode()
 
 fire_queue = build_fire_queue(their_cs)
@@ -261,7 +267,7 @@ while True:
         if all_ships_destroyed():
             print("All our ships destroyed — we lost.")
             validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
-            send_sfr()
+            send_sfr_honest()
             print("Waiting for host SFR to validate our shots...")
             recv_and_validate_sfr(we_hit_coords, we_miss_coords)
             break
@@ -280,8 +286,7 @@ while True:
                 we_miss_coords.append(c)
 
     elif msgid == "SFR":
-        # Discard any shots fired after the host already decided to send SFR —
-        # we never got a BMR for them so we don't know the result; skip them.
+        # Discard unacknowledged shots — no BMR will come for them
         while pending_shots:
             pending_shots.popleft()
 
@@ -292,6 +297,7 @@ while True:
             if m == "SFR":
                 their_r[p[0]] = p[1:].decode('ascii')
 
+        # Validate host's field against our shots honestly
         ok = True
         for (x, y) in we_hit_coords:
             if their_r[x][y] == '0':
@@ -304,8 +310,9 @@ while True:
         if ok:
             print("Host field validation passed — no cheating detected.")
         validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
-        print("Sending our SFR so host can validate us.")
-        send_sfr()
+
+        # CHEAT: send forged all-zero SFR instead of real field
+        send_sfr_forged()
         break
 
     elif msgid == "STR":

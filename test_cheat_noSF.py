@@ -230,7 +230,13 @@ while True:
         else:
             result = b'M'
             host_miss_coords.append((x, y))
-        send_frame("BMR", result)
+        # CHEAT: randomly flip BMR response
+        if random.random() < 0.5:
+            fake = b'M' if result == b'H' else b'H'
+            print(f"CHEATING: real={result} sending={fake}")
+            send_frame("BMR", fake)
+        else:
+            send_frame("BMR", result)
         coord = next_shot()
         pending_shots.append((coord[0], coord[1]))
         send_frame("BOO", coord)
@@ -259,14 +265,22 @@ while True:
             host_miss_coords.append((x, y))
 
         if all_ships_destroyed():
-            print("All our ships destroyed — we lost.")
-            validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
-            send_sfr()
-            print("Waiting for host SFR to validate our shots...")
+            # We lost — send forged all-water SFR, then receive host's SFR
+            print("All our ships destroyed — we lost. Sending forged SFR.")
+            for row in range(10):
+                send_frame("SFR", bytes([row]) + b'0' * 10)
+            print("Waiting for host SFR...")
             recv_and_validate_sfr(we_hit_coords, we_miss_coords)
             break
 
-        send_frame("BMR", result)
+        # CHEAT: randomly flip BMR response
+        if random.random() < 0.5:
+            fake = b'M' if result == b'H' else b'H'
+            print(f"CHEATING: real={result} sending={fake}")
+            send_frame("BMR", fake)
+        else:
+            send_frame("BMR", result)
+
         coord = next_shot()
         pending_shots.append((coord[0], coord[1]))
         send_frame("BOO", coord)
@@ -304,8 +318,9 @@ while True:
         if ok:
             print("Host field validation passed — no cheating detected.")
         validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
-        print("Sending our SFR so host can validate us.")
-        send_sfr()
+        print("Sending our forged SFR so host can detect our cheating.")
+        for row in range(10):
+            send_frame("SFR", bytes([row]) + b'0' * 10)
         break
 
     elif msgid == "STR":

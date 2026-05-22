@@ -153,18 +153,68 @@ def all_ships_destroyed():
     )
 
 
-def field_to_bytes():
-    # simple flat encoding (adapt if your schiff.py expects something else)
-    flat = []
-    for row in field:
-        for v in row:
-            flat.append(v)
-    return bytes(flat)
-
-
 def random_shot():
     return bytes([random.randint(0, 9), random.randint(0, 9)])
 
+
+def send_sfr():
+    """Send our own field row by row."""
+    for row in range(10):
+        row_str = "".join(str(original_field[row][col]) for col in range(10))
+        payload = bytes([row]) + row_str.encode('ascii')
+        send_frame("SFR", payload)
+
+
+def recv_and_validate_sfr(we_hit_coords, we_miss_coords):
+    """Receive 10 SFR rows from host and validate OUR shots against their field."""
+    their_r = {}
+    for _ in range(10):
+        msgid, payload = recv_frame()
+        if msgid != "SFR":
+            print(f"Expected SFR, got {msgid}")
+            return
+        row = payload[0]
+        s = payload[1:].decode('ascii')
+        their_r[row] = s
+    ok = True
+    for (x, y) in we_hit_coords:
+        if their_r[x][y] == '0':
+            print(f"CHEAT DETECTED: we reported HIT at ({x},{y}) but host field shows water!")
+            ok = False
+    for (x, y) in we_miss_coords:
+        if their_r[x][y] != '0':
+            print(f"CHEAT DETECTED: we reported MISS at ({x},{y}) but host field shows ship!")
+            ok = False
+    if ok:
+        print("Host field validation passed — no cheating detected.")
+
+
+def validate_their_shots_on_our_field(hit_coords, miss_coords):
+    """Validate host's shots against our own known field — no SFR exchange needed."""
+    ok = True
+    for (x, y) in hit_coords:
+        if original_field[x][y] == 0:
+            print(f"CHEAT DETECTED: host reported HIT at ({x},{y}) but our field shows water!")
+            ok = False
+    for (x, y) in miss_coords:
+        if original_field[x][y] != 0:
+            print(f"CHEAT DETECTED: host reported MISS at ({x},{y}) but our field shows ship!")
+            ok = False
+    if ok:
+        print("Our field validation passed — host shots are consistent.")
+
+
+# track host's shots on us (to validate against our own field)
+host_hit_coords = []   # coords where host hit us
+host_miss_coords = []  # coords where host missed us
+
+# track our shots at the host (to validate against host's SFR)
+we_hit_coords = []
+we_miss_coords = []
+
+# FIFO queue of coords we fired — each BMR pops the oldest entry
+from collections import deque
+shot_queue = deque()
 
 # ---------------- HANDSHAKE ----------------
 
@@ -190,10 +240,14 @@ while True:
                 if (x, y) in ship["coords"]:
                     ship["hits"].add((x, y))
                     break
+            host_hit_coords.append((x, y))
         else:
             result = b'M'
+            host_miss_coords.append((x, y))
         send_frame("BMR", result)
-        send_frame("BOO", random_shot())
+        shot = random_shot()
+        shot_queue.append((shot[0], shot[1]))
+        send_frame("BOO", shot)
         break
     else:
         print("Unexpected during handshake:", msgid)
@@ -208,43 +262,86 @@ while True:
     if msgid == "BOO":
         x, y = payload
 
-        # check hit or miss
+        # check hit or miss on our field
         if original_field[x][y] != 0:
             result = b'H'
-
-            # ✅ locate the correct ship safely
             for sid, ship in ships.items():
                 if (x, y) in ship["coords"]:
                     ship["hits"].add((x, y))
                     break
+            host_hit_coords.append((x, y))
         else:
             result = b'M'
+            host_miss_coords.append((x, y))
 
-        # ✅ check end of game FIRST
-        
+        # check end of game FIRST
         if all_ships_destroyed():
-            print("All ships destroyed -> sending SFR")
-            
-            for row in range(10):
-                row_str = "".join(str(original_field[row][col]) for col in range(10))
-                payload = bytes([row]) + row_str.encode('ascii')
-                send_frame("SFR", payload)
-
+            # We LOST: validate host's shots against our own field locally,
+            # send our SFR, then receive and validate host's SFR against our shots.
+            print("All our ships destroyed — we lost.")
+            validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
+            send_sfr()
+            print("Waiting for host SFR to validate our shots...")
+            recv_and_validate_sfr(we_hit_coords, we_miss_coords)
             break
 
-
-        # ✅ normal response
+        # normal response
         send_frame("BMR", result)
-
-        # ✅ ALWAYS shoot after responding
-        send_frame("BOO", random_shot())
+        shot = random_shot()
+        shot_queue.append((shot[0], shot[1]))
+        send_frame("BOO", shot)
 
     elif msgid == "BMR":
-        # ✅ DO NOTHING (pipeline protocol)
-        pass
+        # Pop the oldest shot we fired and record the result
+        if shot_queue:
+            coord = shot_queue.popleft()
+            if payload == b'H':
+                we_hit_coords.append(coord)
+            else:
+                we_miss_coords.append(coord)
 
     elif msgid == "SFR":
-        print("Host finished game")
+        # Discard any shots fired after the host already decided to send SFR —
+        # we never got a BMR for them so we don't know the result; skip them.
+        while shot_queue:
+            shot_queue.popleft()
+
+        # We WON: receive remaining SFR rows (first row already in payload),
+        # validate host's field against our shots, then send our SFR back.
+        print("Host finished game — we won! Receiving host SFR.")
+        def parse_sfr_payload(p):
+            row = p[0]
+            row_data = p[1:].decode('ascii')
+            return row, row_data
+
+        row, row_data = parse_sfr_payload(payload)
+        their_r = {row: row_data}
+        for _ in range(9):
+            m, p = recv_frame()
+            if m == "SFR":
+                row, row_data = parse_sfr_payload(p)
+                their_r[row] = row_data
+
+        print(f"DEBUG: we_hit={we_hit_coords}")
+        print(f"DEBUG: we_miss={we_miss_coords}")
+        print("Host field:")
+        for r in range(10):
+            print(f"  row {r}: {their_r.get(r, '???')}")
+
+        ok = True
+        for (x, y) in we_hit_coords:
+            if their_r[x][y] == '0':
+                print(f"CHEAT DETECTED: we reported HIT at ({x},{y}) but host field shows water!")
+                ok = False
+        for (x, y) in we_miss_coords:
+            if their_r[x][y] != '0':
+                print(f"CHEAT DETECTED: we reported MISS at ({x},{y}) but host field shows ship!")
+                ok = False
+        if ok:
+            print("Host field validation passed — no cheating detected.")
+        validate_their_shots_on_our_field(host_hit_coords, host_miss_coords)
+        print("Sending our SFR so host can validate us.")
+        send_sfr()
         break
 
     elif msgid == "STR":

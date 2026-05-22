@@ -175,7 +175,7 @@ class Field:
             # pre-calcuate the sf-records (we do not cheat)
             self.sf_records = []
             for x in range(0, self.sz):
-                f = "SF{}D".format(x)
+                f = ""
                 for y in range(0, self.sz):
                     f += "{}".format(self.f[self.xy_to_idx(x, y)])
                 self.sf_records.append(f)
@@ -609,15 +609,15 @@ class StateMachine:
             result_payload = b'H' if they_hit else b'M'
             self.ser_io.send_message(MSG_BOOM_RESULT, result_payload)
 
-        if we_lost:
+        # Both winner and loser now receive and validate the other side's SF.
+        # Previously only the winner received the loser's SF — now it's symmetric.
+        if we_lost or we_won:
             self.their_r = {}
             for _ in range(0, self.f.sz):
                 msg_id, payload = self.ser_io.receive_message()
                 if not self.sf_handler(msg_id, payload):
-                    raise RuntimeError('expected SF message after loss')
+                    raise RuntimeError('expected SF message after game end')
             self.validate_their_r()
-
-        if we_lost or we_won:
             self.state = self.State.FINISHED
             self.we_won = we_won
             
@@ -656,6 +656,10 @@ def main(state_machine, args):
                 tournament_result_char = 'l'
 
         except (TimeoutError, RuntimeError) as e:
+            cheat_error = "cheat" in str(e).lower() or "never sent the sf" in str(e).lower()
+            if cheat_error:
+                logging.error("Cheating detected — stopping: {}".format(e))
+                raise
             if not args.tournament:
                 logging.error("Exception in game-loop, will reset the game state")
                 logging.error(e)
