@@ -12,8 +12,21 @@ original_field = [[0] * FIELD_SIZE for _ in range(FIELD_SIZE)]
 
 # ---------------- FRAME HANDLING ----------------
 
+# CRC-8/SMBUS lookup table — polynomial 0x07, init 0x00, no reflection, no final XOR
+# Matches the STM32F091 hardware CRC peripheral (8-bit mode, poly=0x07)
+_CRC8_TABLE = [0] * 256
+for _i in range(256):
+    _c = _i
+    for _ in range(8):
+        _c = ((_c << 1) ^ 0x07) if (_c & 0x80) else (_c << 1)
+    _CRC8_TABLE[_i] = _c & 0xFF
+
 def calc_crc(data: bytes) -> int:
-    return sum(data) & 0xFF
+    """CRC-8/SMBUS: poly=0x07, init=0x00. Check value: calc_crc(bytes(range(0x31,0x3A))) == 0xF4"""
+    crc = 0x00
+    for byte in data:
+        crc = _CRC8_TABLE[crc ^ byte]
+    return crc
 
 
 def send_frame(msgid: str, payload: bytes):
