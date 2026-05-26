@@ -1,3 +1,6 @@
+# C-BSc-Embedded-Systems Final Project
+
+
 ## 🚀 Usage
 
 This project includes a Python script that interfaces with serial devices. It supports both Linux and Windows platforms.
