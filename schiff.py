@@ -479,7 +479,6 @@ class StateMachine:
         if not ok:
             self.err_out()
             return
-        send_sf_records = False
         they_hit = False
         if not we_won:
             self.fs.update(xy, we_hit)
@@ -502,27 +501,25 @@ class StateMachine:
             else:
                 logging.info("they MISS @{}".format(xy))
             logging.info("Our Gamefield\n: {}".format(self.f))
-        else:
-            send_sf_records = True
         we_lost = False
         if self.f.ships_left() == 0:
             logging.info("we have no ships left, we just lost the game")
-            send_sf_records = True
             we_lost = True
-        if send_sf_records:
+        if we_lost or we_won:
             for row_idx, row in enumerate(self.f.get_sf_records()):
                 payload = bytes([row_idx]) + row.encode('ascii')
                 self.ser_io.send_message(MSG_SF, payload)
         else:
             result_payload = b'H' if they_hit else b'M'
             self.ser_io.send_message(MSG_BOOM_RESULT, result_payload)
-        if we_lost or we_won:
+        if we_lost:
             self.their_r = {}
             for _ in range(0, self.f.sz):
                 msg_id, payload = self.ser_io.receive_message()
                 if not self.sf_handler(msg_id, payload):
                     raise RuntimeError('expected SF message after game end')
             self.validate_their_r()
+        if we_lost or we_won:
             self.state = self.State.FINISHED
             self.we_won = we_won
 
