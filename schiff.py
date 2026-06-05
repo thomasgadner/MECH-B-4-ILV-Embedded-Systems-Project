@@ -68,7 +68,7 @@ class SerialIO:
         self.ser_dev = args.ser_dev
         self.notimeout = args.notimeout
         self.raw_debug = getattr(args, 'raw_debug', False)
-        self.dev = serial.serial_for_url(self.ser_dev, 9600, timeout=2)
+        self.dev = serial.serial_for_url(self.ser_dev, 115200, timeout=2)
 
     def _calc_crc(self, msg_id: bytes, length: int, payload: bytes) -> int:
         """CRC-8/SMBUS: polynomial 0x07, init 0x00, no reflection, no final XOR.
