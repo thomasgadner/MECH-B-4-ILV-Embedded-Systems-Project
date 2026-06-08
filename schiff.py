@@ -509,19 +509,18 @@ class StateMachine:
             for row_idx, row in enumerate(self.f.get_sf_records()):
                 payload = bytes([row_idx]) + row.encode('ascii')
                 self.ser_io.send_message(MSG_SF, payload)
+            if we_lost:
+                self.their_r = {}
+                for _ in range(0, self.f.sz):
+                    msg_id, payload = self.ser_io.receive_message()
+                    if not self.sf_handler(msg_id, payload):
+                        raise RuntimeError('expected SF message after game end')
+                self.validate_their_r()
+            self.state = self.State.FINISHED
+            self.we_won = we_won
         else:
             result_payload = b'H' if they_hit else b'M'
             self.ser_io.send_message(MSG_BOOM_RESULT, result_payload)
-        if we_lost:
-            self.their_r = {}
-            for _ in range(0, self.f.sz):
-                msg_id, payload = self.ser_io.receive_message()
-                if not self.sf_handler(msg_id, payload):
-                    raise RuntimeError('expected SF message after game end')
-            self.validate_their_r()
-        if we_lost or we_won:
-            self.state = self.State.FINISHED
-            self.we_won = we_won
 
 
 def main(state_machine, args):
